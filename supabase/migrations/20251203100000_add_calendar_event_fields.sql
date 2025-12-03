@@ -17,7 +17,7 @@ CHECK (intensity >= 0 AND intensity <= 3);
 
 -- Add connected calendar fields
 ALTER TABLE public.workout_events 
-ADD COLUMN IF NOT EXISTS connected_calendar_id TEXT;
+ADD COLUMN IF NOT EXISTS connected_calendar_id UUID;
 
 ALTER TABLE public.workout_events 
 ADD COLUMN IF NOT EXISTS connected_calendar_type TEXT
