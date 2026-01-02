@@ -19,6 +19,7 @@ services:
       - VITE_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - VITE_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
       - VITE_CALENDAR_API_URL=http://localhost:8003
+      - VITE_SENTRY_DSN=${SENTRY_DSN_UI}
     networks:
       - amakaflow
     depends_on:
@@ -40,6 +41,8 @@ services:
       - PYTHONUNBUFFERED=1
       - MAPPER_API_URL=http://mapper:8001
       - CLERK_DOMAIN=${CLERK_DOMAIN}
+      - SENTRY_DSN=${SENTRY_DSN_API}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
     networks:
       - amakaflow
     depends_on:
@@ -64,6 +67,9 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - INGESTOR_URL=http://workout-ingestor:8004
       - CLERK_DOMAIN=${CLERK_DOMAIN}
+      - API_KEYS=sk_test_dev_key
+      - SENTRY_DSN=${SENTRY_DSN_API}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
     networks:
       - amakaflow
 
@@ -102,6 +108,8 @@ services:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - CLERK_DOMAIN=${CLERK_DOMAIN}
+      - SENTRY_DSN=${SENTRY_DSN_API}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
     networks:
       - amakaflow
 
