@@ -33,8 +33,12 @@ from typing import Optional
 from fastapi import Depends, Header, HTTPException
 from supabase import Client, create_client
 
-from application.ports import ProgramRepository
-from infrastructure.db import SupabaseProgramRepository
+from application.ports import ExerciseRepository, ProgramRepository, TemplateRepository
+from infrastructure.db import (
+    SupabaseExerciseRepository,
+    SupabaseProgramRepository,
+    SupabaseTemplateRepository,
+)
 from backend.settings import Settings, get_settings as _get_settings
 
 
@@ -125,6 +129,42 @@ def get_program_repo(
     return SupabaseProgramRepository(client)
 
 
+def get_template_repo(
+    client: Client = Depends(get_supabase_client_required),
+) -> TemplateRepository:
+    """
+    Get TemplateRepository implementation.
+
+    Returns a SupabaseTemplateRepository instance with injected client.
+    The return type is the Protocol to enable easy mocking.
+
+    Args:
+        client: Supabase client (injected)
+
+    Returns:
+        TemplateRepository: Repository for template access
+    """
+    return SupabaseTemplateRepository(client)
+
+
+def get_exercise_repo(
+    client: Client = Depends(get_supabase_client_required),
+) -> ExerciseRepository:
+    """
+    Get ExerciseRepository implementation.
+
+    Returns a SupabaseExerciseRepository instance with injected client.
+    The return type is the Protocol to enable easy mocking.
+
+    Args:
+        client: Supabase client (injected)
+
+    Returns:
+        ExerciseRepository: Repository for exercise data access
+    """
+    return SupabaseExerciseRepository(client)
+
+
 # =============================================================================
 # Authentication Providers
 # =============================================================================
@@ -211,7 +251,9 @@ __all__ = [
     "get_supabase_client",
     "get_supabase_client_required",
     # Repositories
+    "get_exercise_repo",
     "get_program_repo",
+    "get_template_repo",
     # Authentication
     "get_current_user",
     "get_optional_user",
