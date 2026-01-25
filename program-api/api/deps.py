@@ -27,6 +27,7 @@ Testing:
     app.dependency_overrides[get_program_repo] = lambda: MockProgramRepository()
 """
 
+import os
 from functools import lru_cache
 from typing import Optional
 
@@ -187,7 +188,18 @@ async def get_current_user(
 
     Raises:
         HTTPException: 401 if authentication fails
+        RuntimeError: If auth stub is used in production
     """
+    # CRITICAL: Block production deployment with auth stub
+    # This ensures we don't accidentally deploy without proper auth
+    environment = os.environ.get("ENVIRONMENT", "development").lower()
+    if environment == "production":
+        raise RuntimeError(
+            "Authentication stub cannot be used in production. "
+            "Implement proper Clerk JWT validation before deploying. "
+            "See AMA-463 for auth implementation tracking."
+        )
+
     if not authorization:
         raise HTTPException(
             status_code=401,
@@ -203,7 +215,7 @@ async def get_current_user(
 
     token = authorization[7:]  # Remove "Bearer " prefix
 
-    # TODO: Implement proper Clerk JWT validation
+    # TODO: Implement proper Clerk JWT validation (AMA-463)
     # For now, this is a stub that will be replaced with real auth
     # The token should be validated against Clerk's JWKS
     if not token:

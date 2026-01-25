@@ -8,6 +8,8 @@ Provides the OpenAIExerciseSelector class for LLM-powered exercise selection.
 
 import json
 import logging
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -31,6 +33,14 @@ class ExerciseSelectorError(Exception):
     pass
 
 
+@dataclass
+class CacheEntry:
+    """Cache entry with TTL support."""
+
+    response: "ExerciseSelectionResponse"
+    created_at: float
+
+
 class OpenAIExerciseSelector:
     """
     OpenAI-powered exercise selector for program generation.
@@ -43,10 +53,16 @@ class OpenAIExerciseSelector:
     DEFAULT_MODEL = "gpt-4o-mini"
     MAX_RETRIES = 2
 
+    # Cache configuration
+    CACHE_MAX_SIZE = 100  # Maximum cache entries
+    CACHE_TTL_SECONDS = 3600  # 1 hour TTL
+
     def __init__(
         self,
         api_key: str,
         model: str = DEFAULT_MODEL,
+        cache_max_size: int = CACHE_MAX_SIZE,
+        cache_ttl_seconds: int = CACHE_TTL_SECONDS,
     ):
         """
         Initialize the exercise selector.
@@ -54,10 +70,14 @@ class OpenAIExerciseSelector:
         Args:
             api_key: OpenAI API key
             model: Model to use (default: gpt-4o-mini)
+            cache_max_size: Maximum number of cached responses (default: 100)
+            cache_ttl_seconds: Cache TTL in seconds (default: 3600)
         """
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
-        self._cache: dict[str, ExerciseSelectionResponse] = {}
+        self._cache: dict[str, CacheEntry] = {}
+        self._cache_max_size = cache_max_size
+        self._cache_ttl = cache_ttl_seconds
 
     def _cache_key(self, request: ExerciseSelectionRequest) -> str:
         """Generate cache key for a request."""
@@ -83,9 +103,11 @@ class OpenAIExerciseSelector:
         """
         # Check cache
         cache_key = self._cache_key(request)
-        if use_cache and cache_key in self._cache:
-            logger.debug(f"Using cached response for {cache_key}")
-            return self._cache[cache_key]
+        if use_cache:
+            cached = self._get_from_cache(cache_key)
+            if cached is not None:
+                logger.debug(f"Using cached response for {cache_key}")
+                return cached
 
         # Build prompt
         user_prompt = build_exercise_selection_prompt(
@@ -111,7 +133,7 @@ class OpenAIExerciseSelector:
 
                 # Cache successful response
                 if use_cache:
-                    self._cache[cache_key] = parsed
+                    self._add_to_cache(cache_key, parsed)
 
                 return parsed
 
@@ -276,6 +298,86 @@ class OpenAIExerciseSelector:
             estimated_duration_minutes=len(exercises) * 8 + 10,
         )
 
+    def _get_from_cache(self, key: str) -> Optional[ExerciseSelectionResponse]:
+        """
+        Get a response from cache if valid.
+
+        Args:
+            key: Cache key
+
+        Returns:
+            Cached response if valid and not expired, None otherwise
+        """
+        entry = self._cache.get(key)
+        if entry is None:
+            return None
+
+        # Check TTL
+        if time.time() - entry.created_at > self._cache_ttl:
+            # Entry expired, remove it
+            del self._cache[key]
+            return None
+
+        return entry.response
+
+    def _add_to_cache(self, key: str, response: ExerciseSelectionResponse) -> None:
+        """
+        Add a response to cache with size limit enforcement.
+
+        Args:
+            key: Cache key
+            response: Response to cache
+        """
+        # Evict oldest entries if cache is full
+        if len(self._cache) >= self._cache_max_size:
+            self._evict_oldest_entries()
+
+        self._cache[key] = CacheEntry(
+            response=response,
+            created_at=time.time()
+        )
+
+    def _evict_oldest_entries(self) -> None:
+        """Evict oldest entries to make room for new ones."""
+        if not self._cache:
+            return
+
+        # Remove expired entries first
+        current_time = time.time()
+        expired_keys = [
+            k for k, v in self._cache.items()
+            if current_time - v.created_at > self._cache_ttl
+        ]
+        for key in expired_keys:
+            del self._cache[key]
+
+        # If still over limit, remove oldest entries (LRU approximation)
+        if len(self._cache) >= self._cache_max_size:
+            # Sort by creation time and remove oldest 20%
+            entries = sorted(self._cache.items(), key=lambda x: x[1].created_at)
+            num_to_remove = max(1, len(entries) // 5)
+            for key, _ in entries[:num_to_remove]:
+                del self._cache[key]
+
     def clear_cache(self) -> None:
         """Clear the response cache."""
         self._cache.clear()
+
+    def get_cache_stats(self) -> dict:
+        """
+        Get cache statistics for monitoring.
+
+        Returns:
+            Dictionary with cache stats
+        """
+        current_time = time.time()
+        valid_entries = sum(
+            1 for entry in self._cache.values()
+            if current_time - entry.created_at <= self._cache_ttl
+        )
+        return {
+            "total_entries": len(self._cache),
+            "valid_entries": valid_entries,
+            "max_size": self._cache_max_size,
+            "ttl_seconds": self._cache_ttl,
+        }

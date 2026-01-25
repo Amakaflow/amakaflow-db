@@ -11,8 +11,11 @@ This service orchestrates the hybrid template-guided LLM approach:
 5. Persistence - Save to database
 """
 
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import partial
 from typing import Dict, List, Optional
 from uuid import uuid4
 
@@ -86,6 +89,9 @@ class ProgramGenerator:
         if openai_api_key:
             self._exercise_selector = OpenAIExerciseSelector(api_key=openai_api_key)
 
+        # Thread pool for running sync DB operations from async context
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="program_gen_")
+
     async def generate(
         self,
         request: GenerateProgramRequest,
@@ -136,8 +142,12 @@ class ProgramGenerator:
                 suggestions.append(
                     f"Using template: {template_match.template.get('name')}"
                 )
-                # Increment usage count
-                self._template_repo.increment_usage_count(template_id)
+                # Increment usage count (run in thread pool to avoid blocking)
+                await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    self._template_repo.increment_usage_count,
+                    template_id
+                )
             else:
                 # Use default structure
                 structure = await self._template_selector.get_default_structure(
@@ -214,8 +224,12 @@ class ProgramGenerator:
                 },
             }
 
-            # Persist program
-            created_program = self._program_repo.create(program_create_data)
+            # Persist program (run in thread pool to avoid blocking)
+            created_program = await asyncio.get_event_loop().run_in_executor(
+                self._executor,
+                self._program_repo.create,
+                program_create_data
+            )
             logger.info(f"Created program {program_id}")
 
             # Persist weeks and workouts
@@ -230,7 +244,10 @@ class ProgramGenerator:
                     "notes": week_data.get("notes"),
                 }
 
-                created_week = self._program_repo.create_week(program_id, week_create_data)
+                created_week = await asyncio.get_event_loop().run_in_executor(
+                    self._executor,
+                    partial(self._program_repo.create_week, program_id, week_create_data)
+                )
                 week_id = created_week["id"]
 
                 # Persist workouts
@@ -246,7 +263,10 @@ class ProgramGenerator:
                         "sort_order": idx,
                     }
 
-                    created_workout = self._program_repo.create_workout(week_id, workout_create_data)
+                    created_workout = await asyncio.get_event_loop().run_in_executor(
+                        self._executor,
+                        partial(self._program_repo.create_workout, week_id, workout_create_data)
+                    )
                     workouts.append(
                         ProgramWorkout(
                             id=created_workout["id"],
@@ -381,11 +401,15 @@ class ProgramGenerator:
         if params.is_deload:
             exercise_slots = max(3, exercise_slots - 2)
 
-        # Get available exercises from database
-        available_exercises = self._exercise_repo.get_for_workout_type(
-            workout_type=workout_type,
-            equipment=request.equipment_available,
-            limit=50,
+        # Get available exercises from database (run in thread pool)
+        available_exercises = await asyncio.get_event_loop().run_in_executor(
+            self._executor,
+            partial(
+                self._exercise_repo.get_for_workout_type,
+                workout_type=workout_type,
+                equipment=request.equipment_available,
+                limit=50,
+            )
         )
 
         # Select exercises

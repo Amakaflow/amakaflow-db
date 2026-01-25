@@ -148,3 +148,25 @@ class ExerciseRepository(Protocol):
             List of all exercise dictionaries
         """
         ...
+
+    def get_for_workout_type(
+        self,
+        workout_type: str,
+        equipment: List[str],
+        limit: int = 30,
+    ) -> List[Dict]:
+        """
+        Get exercises suitable for a specific workout type.
+
+        This is a convenience method that maps workout types to muscle groups
+        and movement patterns.
+
+        Args:
+            workout_type: Type of workout (push, pull, legs, upper, lower, full_body)
+            equipment: Available equipment to filter by
+            limit: Maximum number of results
+
+        Returns:
+            List of matching exercise dictionaries
+        """
+        ...
