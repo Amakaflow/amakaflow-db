@@ -13,8 +13,9 @@
 -- This migration:
 -- 1. Adds user_id column to program_weeks and program_workouts
 -- 2. Backfills user_id from parent tables
--- 3. Replaces join-based RLS policies with direct user_id checks
--- 4. Adds indexes for the new user_id columns
+-- 3. Replaces join-based RLS policies with direct user_id checks (SELECT/UPDATE/DELETE)
+-- 4. Keeps join-based INSERT policies (trigger runs after RLS evaluation)
+-- 5. Adds indexes for the new user_id columns
 -- ============================================================================
 
 -- ============================================================================
@@ -69,11 +70,11 @@ FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE;
 -- Step 4: Add indexes for RLS lookups on user_id
 -- ============================================================================
 
-CREATE INDEX IF NOT EXISTS idx_weeks_user ON program_weeks(user_id);
-CREATE INDEX IF NOT EXISTS idx_workouts_user ON program_workouts(user_id);
+CREATE INDEX IF NOT EXISTS idx_program_weeks_user ON program_weeks(user_id);
+CREATE INDEX IF NOT EXISTS idx_program_workouts_user ON program_workouts(user_id);
 
--- Composite index for common query: user's workouts by week and day
-CREATE INDEX IF NOT EXISTS idx_workouts_user_week ON program_workouts(user_id, week_id);
+-- Composite index for common query: user's workouts by week
+CREATE INDEX IF NOT EXISTS idx_program_workouts_user_week ON program_workouts(user_id, week_id);
 
 -- ============================================================================
 -- Step 5: Drop old join-based RLS policies
@@ -92,17 +93,25 @@ DROP POLICY IF EXISTS "Users can update workouts of own programs" ON program_wor
 DROP POLICY IF EXISTS "Users can delete workouts of own programs" ON program_workouts;
 
 -- ============================================================================
--- Step 6: Create new direct user_id RLS policies
+-- Step 6: Create new RLS policies
+--
+-- SELECT/UPDATE/DELETE: Use direct user_id check (fast, no joins)
+-- INSERT: Keep join-based check (trigger runs after RLS, so can't rely on it)
 -- ============================================================================
 
--- program_weeks: Direct user_id check (no joins needed)
+-- program_weeks policies
 CREATE POLICY "Users can view own program weeks"
     ON program_weeks FOR SELECT
     USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
 
+-- INSERT must check parent because trigger populates user_id AFTER RLS evaluation
 CREATE POLICY "Users can create own program weeks"
     ON program_weeks FOR INSERT
-    WITH CHECK (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+    WITH CHECK (EXISTS (
+        SELECT 1 FROM training_programs tp
+        WHERE tp.id = program_weeks.program_id
+        AND tp.user_id = current_setting('request.jwt.claims', true)::json->>'sub'
+    ));
 
 CREATE POLICY "Users can update own program weeks"
     ON program_weeks FOR UPDATE
@@ -112,14 +121,20 @@ CREATE POLICY "Users can delete own program weeks"
     ON program_weeks FOR DELETE
     USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
 
--- program_workouts: Direct user_id check (no joins needed)
+-- program_workouts policies
 CREATE POLICY "Users can view own program workouts"
     ON program_workouts FOR SELECT
     USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
 
+-- INSERT must check parent because trigger populates user_id AFTER RLS evaluation
 CREATE POLICY "Users can create own program workouts"
     ON program_workouts FOR INSERT
-    WITH CHECK (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+    WITH CHECK (EXISTS (
+        SELECT 1 FROM program_weeks pw
+        JOIN training_programs tp ON tp.id = pw.program_id
+        WHERE pw.id = program_workouts.week_id
+        AND tp.user_id = current_setting('request.jwt.claims', true)::json->>'sub'
+    ));
 
 CREATE POLICY "Users can update own program workouts"
     ON program_workouts FOR UPDATE
@@ -130,7 +145,19 @@ CREATE POLICY "Users can delete own program workouts"
     USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
 
 -- ============================================================================
--- Step 7: Create trigger to auto-populate user_id on INSERT
+-- Step 7: Preserve service role access
+-- ============================================================================
+
+CREATE POLICY "Service role full access on program weeks"
+    ON program_weeks FOR ALL
+    USING (current_setting('request.jwt.claims', true)::json->>'role' = 'service_role');
+
+CREATE POLICY "Service role full access on program workouts"
+    ON program_workouts FOR ALL
+    USING (current_setting('request.jwt.claims', true)::json->>'role' = 'service_role');
+
+-- ============================================================================
+-- Step 8: Create triggers to auto-populate user_id on INSERT
 -- ============================================================================
 
 -- Trigger for program_weeks: copy user_id from parent training_programs
@@ -141,6 +168,10 @@ BEGIN
         SELECT user_id INTO NEW.user_id
         FROM training_programs
         WHERE id = NEW.program_id;
+
+        IF NEW.user_id IS NULL THEN
+            RAISE EXCEPTION 'Cannot set user_id: training_programs with id % not found', NEW.program_id;
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -159,6 +190,10 @@ BEGIN
         SELECT user_id INTO NEW.user_id
         FROM program_weeks
         WHERE id = NEW.week_id;
+
+        IF NEW.user_id IS NULL THEN
+            RAISE EXCEPTION 'Cannot set user_id: program_weeks with id % not found', NEW.week_id;
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -168,6 +203,30 @@ DROP TRIGGER IF EXISTS trigger_set_program_workouts_user_id ON program_workouts;
 CREATE TRIGGER trigger_set_program_workouts_user_id
     BEFORE INSERT ON program_workouts
     FOR EACH ROW EXECUTE FUNCTION set_program_workouts_user_id();
+
+-- ============================================================================
+-- Step 9: Prevent user_id modification (data integrity)
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION prevent_user_id_modification()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.user_id IS DISTINCT FROM NEW.user_id THEN
+        RAISE EXCEPTION 'Cannot modify user_id on %', TG_TABLE_NAME;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS prevent_program_weeks_user_id_change ON program_weeks;
+CREATE TRIGGER prevent_program_weeks_user_id_change
+    BEFORE UPDATE ON program_weeks
+    FOR EACH ROW EXECUTE FUNCTION prevent_user_id_modification();
+
+DROP TRIGGER IF EXISTS prevent_program_workouts_user_id_change ON program_workouts;
+CREATE TRIGGER prevent_program_workouts_user_id_change
+    BEFORE UPDATE ON program_workouts
+    FOR EACH ROW EXECUTE FUNCTION prevent_user_id_modification();
 
 -- ============================================================================
 -- Comments
