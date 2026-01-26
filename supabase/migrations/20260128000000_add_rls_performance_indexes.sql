@@ -1,25 +1,177 @@
 -- ============================================================================
--- AMA-492: Add Missing Indexes for RLS Performance
+-- AMA-492: Denormalize user_id for RLS Performance
 --
--- The program_workouts RLS policy joins through program_weeks:
---   USING (EXISTS (
---       SELECT 1 FROM program_weeks pw
---       JOIN training_programs tp ON tp.id = pw.program_id
---       WHERE pw.id = program_workouts.week_id  -- Lookup by pw.id
---       ...
---   ));
+-- The original RLS policies for program_weeks and program_workouts use nested
+-- subqueries that join through parent tables to verify user ownership:
 --
--- While program_weeks.id has an implicit index via PRIMARY KEY, adding an
--- explicit B-tree index can help the query planner optimize RLS subqueries.
--- Additionally, a composite index on (week_id, day_of_week) supports common
--- query patterns for fetching workouts.
+--   program_workouts -> program_weeks -> training_programs (user_id check)
+--
+-- This two-level join is expensive for every row access. The original schema
+-- noted: "If query performance becomes an issue, consider denormalizing user_id
+-- onto child tables."
+--
+-- This migration:
+-- 1. Adds user_id column to program_weeks and program_workouts
+-- 2. Backfills user_id from parent tables
+-- 3. Replaces join-based RLS policies with direct user_id checks
+-- 4. Adds indexes for the new user_id columns
 -- ============================================================================
 
--- Index on program_weeks.id for RLS policy lookups
--- The primary key creates an index, but explicit indexes can improve
--- query planner decisions for EXISTS subqueries in RLS policies
-CREATE INDEX IF NOT EXISTS idx_weeks_id ON program_weeks(id);
+-- ============================================================================
+-- Step 1: Add user_id columns (nullable initially for backfill)
+-- ============================================================================
 
--- Composite index for common query pattern: fetch workouts by week and day
--- Supports queries like: SELECT * FROM program_workouts WHERE week_id = ? ORDER BY day_of_week
-CREATE INDEX IF NOT EXISTS idx_workouts_week_day ON program_workouts(week_id, day_of_week);
+ALTER TABLE program_weeks
+ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+ALTER TABLE program_workouts
+ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+-- ============================================================================
+-- Step 2: Backfill user_id from parent tables
+-- ============================================================================
+
+-- Backfill program_weeks.user_id from training_programs
+UPDATE program_weeks pw
+SET user_id = tp.user_id
+FROM training_programs tp
+WHERE pw.program_id = tp.id
+AND pw.user_id IS NULL;
+
+-- Backfill program_workouts.user_id from program_weeks (which now has user_id)
+UPDATE program_workouts po
+SET user_id = pw.user_id
+FROM program_weeks pw
+WHERE po.week_id = pw.id
+AND po.user_id IS NULL;
+
+-- ============================================================================
+-- Step 3: Add NOT NULL constraint and foreign key after backfill
+-- ============================================================================
+
+-- Make user_id NOT NULL (all existing rows should now have values)
+ALTER TABLE program_weeks
+ALTER COLUMN user_id SET NOT NULL;
+
+ALTER TABLE program_workouts
+ALTER COLUMN user_id SET NOT NULL;
+
+-- Add foreign key references to profiles
+ALTER TABLE program_weeks
+ADD CONSTRAINT fk_program_weeks_user
+FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE;
+
+ALTER TABLE program_workouts
+ADD CONSTRAINT fk_program_workouts_user
+FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE CASCADE;
+
+-- ============================================================================
+-- Step 4: Add indexes for RLS lookups on user_id
+-- ============================================================================
+
+CREATE INDEX IF NOT EXISTS idx_weeks_user ON program_weeks(user_id);
+CREATE INDEX IF NOT EXISTS idx_workouts_user ON program_workouts(user_id);
+
+-- Composite index for common query: user's workouts by week and day
+CREATE INDEX IF NOT EXISTS idx_workouts_user_week ON program_workouts(user_id, week_id);
+
+-- ============================================================================
+-- Step 5: Drop old join-based RLS policies
+-- ============================================================================
+
+-- program_weeks policies
+DROP POLICY IF EXISTS "Users can view weeks of own programs" ON program_weeks;
+DROP POLICY IF EXISTS "Users can create weeks for own programs" ON program_weeks;
+DROP POLICY IF EXISTS "Users can update weeks of own programs" ON program_weeks;
+DROP POLICY IF EXISTS "Users can delete weeks of own programs" ON program_weeks;
+
+-- program_workouts policies
+DROP POLICY IF EXISTS "Users can view workouts of own programs" ON program_workouts;
+DROP POLICY IF EXISTS "Users can create workouts for own programs" ON program_workouts;
+DROP POLICY IF EXISTS "Users can update workouts of own programs" ON program_workouts;
+DROP POLICY IF EXISTS "Users can delete workouts of own programs" ON program_workouts;
+
+-- ============================================================================
+-- Step 6: Create new direct user_id RLS policies
+-- ============================================================================
+
+-- program_weeks: Direct user_id check (no joins needed)
+CREATE POLICY "Users can view own program weeks"
+    ON program_weeks FOR SELECT
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can create own program weeks"
+    ON program_weeks FOR INSERT
+    WITH CHECK (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can update own program weeks"
+    ON program_weeks FOR UPDATE
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can delete own program weeks"
+    ON program_weeks FOR DELETE
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+-- program_workouts: Direct user_id check (no joins needed)
+CREATE POLICY "Users can view own program workouts"
+    ON program_workouts FOR SELECT
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can create own program workouts"
+    ON program_workouts FOR INSERT
+    WITH CHECK (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can update own program workouts"
+    ON program_workouts FOR UPDATE
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+CREATE POLICY "Users can delete own program workouts"
+    ON program_workouts FOR DELETE
+    USING (user_id = current_setting('request.jwt.claims', true)::json->>'sub');
+
+-- ============================================================================
+-- Step 7: Create trigger to auto-populate user_id on INSERT
+-- ============================================================================
+
+-- Trigger for program_weeks: copy user_id from parent training_programs
+CREATE OR REPLACE FUNCTION set_program_weeks_user_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.user_id IS NULL THEN
+        SELECT user_id INTO NEW.user_id
+        FROM training_programs
+        WHERE id = NEW.program_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_set_program_weeks_user_id ON program_weeks;
+CREATE TRIGGER trigger_set_program_weeks_user_id
+    BEFORE INSERT ON program_weeks
+    FOR EACH ROW EXECUTE FUNCTION set_program_weeks_user_id();
+
+-- Trigger for program_workouts: copy user_id from parent program_weeks
+CREATE OR REPLACE FUNCTION set_program_workouts_user_id()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.user_id IS NULL THEN
+        SELECT user_id INTO NEW.user_id
+        FROM program_weeks
+        WHERE id = NEW.week_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_set_program_workouts_user_id ON program_workouts;
+CREATE TRIGGER trigger_set_program_workouts_user_id
+    BEFORE INSERT ON program_workouts
+    FOR EACH ROW EXECUTE FUNCTION set_program_workouts_user_id();
+
+-- ============================================================================
+-- Comments
+-- ============================================================================
+
+COMMENT ON COLUMN program_weeks.user_id IS 'Denormalized user_id for RLS performance - copied from training_programs';
+COMMENT ON COLUMN program_workouts.user_id IS 'Denormalized user_id for RLS performance - copied from program_weeks';
