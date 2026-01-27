@@ -9,7 +9,7 @@
 -- Add program-related columns to workout_events
 ALTER TABLE workout_events
 ADD COLUMN IF NOT EXISTS program_id UUID REFERENCES training_programs(id) ON DELETE SET NULL,
-ADD COLUMN IF NOT EXISTS program_workout_id UUID,
+ADD COLUMN IF NOT EXISTS program_workout_id UUID REFERENCES program_workouts(id) ON DELETE SET NULL,
 ADD COLUMN IF NOT EXISTS program_week_number INTEGER;
 
 -- Update source constraint to include 'training_program'
@@ -44,6 +44,11 @@ CREATE INDEX IF NOT EXISTS idx_workout_events_program
 CREATE INDEX IF NOT EXISTS idx_workout_events_user_program
     ON workout_events(user_id, program_id)
     WHERE program_id IS NOT NULL;
+
+-- Add index for querying by program_workout_id (for webhook lookups)
+CREATE INDEX IF NOT EXISTS idx_workout_events_program_workout
+    ON workout_events(program_workout_id)
+    WHERE program_workout_id IS NOT NULL;
 
 -- ============================================================================
 -- Comments
