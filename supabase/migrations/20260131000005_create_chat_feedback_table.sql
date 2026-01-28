@@ -3,11 +3,12 @@
 -- Part of AMA-437: Feature Flags & Beta Rollout Configuration
 
 -- Create chat_feedback table
+-- Note: session_id and message_id are TEXT to match frontend string IDs (e.g., "msg_abc123")
 CREATE TABLE IF NOT EXISTS chat_feedback (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id TEXT NOT NULL,  -- Clerk user ID
-    session_id UUID REFERENCES chat_sessions(id) ON DELETE SET NULL,
-    message_id UUID REFERENCES chat_messages(id) ON DELETE SET NULL,
+    session_id TEXT,  -- Chat session ID (string format from frontend)
+    message_id TEXT,  -- Message ID (string format like "msg_abc123")
     sentiment TEXT CHECK (sentiment IN ('positive', 'negative', 'neutral')),
     feedback_text TEXT,
     feature TEXT,  -- Which feature the feedback relates to (e.g., 'response_quality', 'tool_execution', 'voice_input')
@@ -27,11 +28,13 @@ ALTER TABLE chat_feedback ENABLE ROW LEVEL SECURITY;
 
 -- RLS Policies
 
--- Users can insert their own feedback
+-- Users can insert their own feedback (must match their JWT user ID)
 CREATE POLICY "Users can insert own feedback"
     ON chat_feedback
     FOR INSERT
-    WITH CHECK (true);  -- Allow any authenticated user to insert (user_id will be set by caller)
+    WITH CHECK (
+        user_id = current_setting('request.jwt.claims', true)::json->>'sub'
+    );
 
 -- Users can read their own feedback
 CREATE POLICY "Users can read own feedback"

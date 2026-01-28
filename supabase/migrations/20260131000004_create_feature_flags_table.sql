@@ -57,6 +57,7 @@ CREATE POLICY "Service role full access to feature flags"
 
 -- RPC function to get merged feature flags for a user
 -- Returns global flags with user-specific overrides applied
+-- Uses jsonb_object_agg for O(n) performance instead of iterative O(n^2) concatenation
 CREATE OR REPLACE FUNCTION get_user_feature_flags(p_user_id TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -64,33 +65,23 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 DECLARE
-    result JSONB := '{}';
-    global_flags JSONB := '{}';
-    user_flags JSONB := '{}';
-    flag_record RECORD;
+    global_flags JSONB;
+    user_flags JSONB;
 BEGIN
-    -- Collect all global flags
-    FOR flag_record IN
-        SELECT flag_key, value
-        FROM feature_flags
-        WHERE scope = 'global'
-    LOOP
-        global_flags := global_flags || jsonb_build_object(flag_record.flag_key, flag_record.value);
-    END LOOP;
+    -- Collect all global flags using aggregate (O(n) instead of O(n^2))
+    SELECT COALESCE(jsonb_object_agg(flag_key, value), '{}'::jsonb)
+    INTO global_flags
+    FROM feature_flags
+    WHERE scope = 'global';
 
-    -- Collect user-specific flags
-    FOR flag_record IN
-        SELECT flag_key, value
-        FROM feature_flags
-        WHERE scope = 'user' AND user_id = p_user_id
-    LOOP
-        user_flags := user_flags || jsonb_build_object(flag_record.flag_key, flag_record.value);
-    END LOOP;
+    -- Collect user-specific flags using aggregate
+    SELECT COALESCE(jsonb_object_agg(flag_key, value), '{}'::jsonb)
+    INTO user_flags
+    FROM feature_flags
+    WHERE scope = 'user' AND user_id = p_user_id;
 
     -- Merge: user flags override global flags
-    result := global_flags || user_flags;
-
-    RETURN result;
+    RETURN global_flags || user_flags;
 END;
 $$;
 
