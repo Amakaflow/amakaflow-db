@@ -10,9 +10,15 @@
 ALTER TABLE workouts
     ADD COLUMN IF NOT EXISTS embedding vector(1536);
 
+ALTER TABLE workouts
+    ADD COLUMN IF NOT EXISTS embedding_content_hash TEXT;
+
 -- Add embedding column to follow_along_workouts
 ALTER TABLE follow_along_workouts
     ADD COLUMN IF NOT EXISTS embedding vector(1536);
+
+ALTER TABLE follow_along_workouts
+    ADD COLUMN IF NOT EXISTS embedding_content_hash TEXT;
 
 -- HNSW indexes for cosine similarity search (partial: only indexed rows)
 -- HNSW chosen over IVFFlat: no training data required, better recall at low-to-medium row counts
