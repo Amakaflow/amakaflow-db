@@ -11,10 +11,29 @@ ALTER TABLE chat_messages
     ADD COLUMN IF NOT EXISTS tool_use_id TEXT;
 
 -- Update role constraint to include 'tool_result'
--- First drop the existing constraint, then add the updated one
-ALTER TABLE chat_messages
-    DROP CONSTRAINT IF EXISTS chat_messages_role_check;
+-- PostgreSQL auto-generates constraint names for inline CHECK constraints,
+-- so we need to dynamically find and drop the existing role constraint.
+DO $$
+DECLARE
+    constraint_name TEXT;
+BEGIN
+    -- Find the existing role check constraint by looking for CHECK constraints
+    -- on chat_messages that reference the 'role' column with IN clause
+    SELECT c.conname INTO constraint_name
+    FROM pg_constraint c
+    JOIN pg_class t ON c.conrelid = t.oid
+    JOIN pg_namespace n ON t.relnamespace = n.oid
+    WHERE t.relname = 'chat_messages'
+      AND c.contype = 'c'  -- CHECK constraint
+      AND pg_get_constraintdef(c.oid) LIKE '%role%IN%';
 
+    -- Drop the existing constraint if found
+    IF constraint_name IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE chat_messages DROP CONSTRAINT ' || quote_ident(constraint_name);
+    END IF;
+END $$;
+
+-- Add the updated constraint with 'tool_result' role
 ALTER TABLE chat_messages
     ADD CONSTRAINT chat_messages_role_check
     CHECK (role IN ('user', 'assistant', 'system', 'tool', 'tool_result'));
