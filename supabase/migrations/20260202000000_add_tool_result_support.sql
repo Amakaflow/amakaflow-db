@@ -13,24 +13,29 @@ ALTER TABLE chat_messages
 -- Update role constraint to include 'tool_result'
 -- PostgreSQL auto-generates constraint names for inline CHECK constraints,
 -- so we need to dynamically find and drop the existing role constraint.
+-- We also need to handle the case where a previous migration run already
+-- created the named constraint.
 DO $$
 DECLARE
-    constraint_name TEXT;
+    constraint_rec RECORD;
 BEGIN
-    -- Find the existing role check constraint by looking for CHECK constraints
-    -- on chat_messages that reference the 'role' column with IN clause
-    SELECT c.conname INTO constraint_name
-    FROM pg_constraint c
-    JOIN pg_class t ON c.conrelid = t.oid
-    JOIN pg_namespace n ON t.relnamespace = n.oid
-    WHERE t.relname = 'chat_messages'
-      AND c.contype = 'c'  -- CHECK constraint
-      AND pg_get_constraintdef(c.oid) LIKE '%role%IN%';
-
-    -- Drop the existing constraint if found
-    IF constraint_name IS NOT NULL THEN
-        EXECUTE 'ALTER TABLE chat_messages DROP CONSTRAINT ' || quote_ident(constraint_name);
-    END IF;
+    -- Drop ALL CHECK constraints on chat_messages that reference role values
+    -- This handles both auto-generated names and the explicit name from previous runs
+    FOR constraint_rec IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        JOIN pg_namespace n ON t.relnamespace = n.oid
+        WHERE t.relname = 'chat_messages'
+          AND n.nspname = 'public'
+          AND c.contype = 'c'  -- CHECK constraint
+          AND (
+              pg_get_constraintdef(c.oid) LIKE '%role%'
+              OR c.conname = 'chat_messages_role_check'
+          )
+    LOOP
+        EXECUTE 'ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS ' || quote_ident(constraint_rec.conname);
+    END LOOP;
 END $$;
 
 -- Add the updated constraint with 'tool_result' role
